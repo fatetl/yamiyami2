@@ -1,0 +1,163 @@
+import ccxt
+import pandas as pd
+import ta
+import matplotlib.pyplot as plt
+import requests
+import time
+
+# 업비트 공개 API 설정
+exchange = ccxt.upbit()
+
+# 라인 알림 함수
+def send_line_message(message):
+    token = 'osVTNy98Q4ClfPY97T464zb23BqD3DVexVae72XvPf9'  # 라인 Notify 토큰
+    url = 'https://notify-api.line.me/api/notify'
+    headers = {'Authorization': f'Bearer {token}'}
+    data = {'message': message}
+    response = requests.post(url, headers=headers, data=data)
+    return response
+
+# 거래대금 상위 20위 종목 가져오기
+def get_top_20_symbols():
+    markets = exchange.fetch_tickers()
+    tickers = []
+    for symbol, data in markets.items():
+        if symbol.startswith('KRW-'):
+            tickers.append((symbol, data['quoteVolume']))
+    top_20 = sorted(tickers, key=lambda x: x[1], reverse=True)[:20]
+    return [symbol for symbol, volume in top_20]
+
+# 데이터 가져오기
+def fetch_ohlcv(symbol, interval='1m', since=None, limit=1000):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=interval, since=since, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+# RSI 계산
+def calculate_rsi(df, window=14):
+    df['RSI'] = ta.momentum.rsi(df['close'], window=window)
+    return df
+
+# 이동평균선 계산
+def calculate_moving_averages(df, short_window=50, long_window=200):
+    df['SMA_50'] = df['close'].rolling(window=short_window).mean()
+    df['SMA_200'] = df['close'].rolling(window=long_window).mean()
+    return df
+
+# 저점 찾기
+def find_troughs(series):
+    troughs = []
+    for i in range(1, len(series)-1):
+        if series[i-1] > series[i] < series[i+1]:
+            troughs.append(i)
+    return troughs
+
+# 고점 찾기
+def find_peaks(series):
+    peaks = []
+    for i in range(1, len(series)-1):
+        if series[i-1] < series[i] > series[i+1]:
+            peaks.append(i)
+    return peaks
+
+# 상승 다이버전스 탐지
+def find_bullish_divergences(df):
+    price_troughs = find_troughs(df['close'])
+    rsi_troughs = find_troughs(df['RSI'])
+    
+    divergences = []
+
+    for i in range(2, len(price_troughs)):
+        if (df['close'].iloc[price_troughs[i]] < df['close'].iloc[price_troughs[i-1]] < df['close'].iloc[price_troughs[i-2]] and
+            df['RSI'].iloc[rsi_troughs[i]] > df['RSI'].iloc[rsi_troughs[i-1]] > df['RSI'].iloc[rsi_troughs[i-2]]):
+            divergences.append((df['timestamp'].iloc[price_troughs[i]], 'Bullish Divergence'))
+
+    return divergences
+
+# 베어 트랩 탐지
+def find_bear_traps(df, lookback=20):
+    bear_traps = []
+
+    for i in range(lookback, len(df)):
+        if df['close'].iloc[i] > df['close'].iloc[i-1] > df['close'].iloc[i-lookback:i-2].min():
+            bear_traps.append((df['timestamp'].iloc[i], 'Bear Trap'))
+
+    return bear_traps
+
+# 이동평균 교차 신호 탐지
+def find_moving_average_crossovers(df):
+    crossovers = []
+
+    for i in range(1, len(df)):
+        if df['SMA_50'].iloc[i] > df['SMA_200'].iloc[i] and df['SMA_50'].iloc[i-1] <= df['SMA_200'].iloc[i-1]:
+            crossovers.append((df['timestamp'].iloc[i], 'Golden Cross'))
+        elif df['SMA_50'].iloc[i] < df['SMA_200'].iloc[i] and df['SMA_50'].iloc[i-1] >= df['SMA_200'].iloc[i-1]:
+            crossovers.append((df['timestamp'].iloc[i], 'Death Cross'))
+
+    return crossovers
+
+# 시각화
+def plot_chart(df, signals):
+    plt.figure(figsize=(14, 7))
+
+    plt.subplot(2, 1, 1)
+    plt.plot(df['timestamp'], df['close'], label='Close Price')
+    for signal in signals:
+        if signal[1] == 'Bullish Divergence':
+            plt.scatter(signal[0], df[df['timestamp'] == signal[0]]['close'], color='green', marker='^', s=100, label='Bullish Divergence')
+        elif signal[1] == 'Bear Trap':
+            plt.scatter(signal[0], df[df['timestamp'] == signal[0]]['close'], color='blue', marker='o', s=100, label='Bear Trap')
+        elif signal[1] == 'Golden Cross':
+            plt.scatter(signal[0], df[df['timestamp'] == signal[0]]['close'], color='gold', marker='^', s=100, label='Golden Cross')
+        elif signal[1] == 'Death Cross':
+            plt.scatter(signal[0], df[df['timestamp'] == signal[0]]['close'], color='black', marker='v', s=100, label='Death Cross')
+    plt.title('Price Chart with Signals')
+    plt.legend()
+
+    plt.subplot(2, 1, 2)
+    plt.plot(df['timestamp'], df['RSI'], label='RSI')
+    plt.axhline(30, linestyle='--', alpha=0.5, color='gray')
+    plt.axhline(70, linestyle='--', alpha=0.5, color='gray')
+    plt.title('RSI Chart')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+# 분석할 기간 설정
+start_date = '2024-04-01'
+since = int(pd.Timestamp(start_date).timestamp() * 1000)
+
+# 거래대금 상위 20위 종목 가져오기
+top_20_symbols = get_top_20_symbols()
+
+# 리얼타임 알림을 위한 무한 루프
+while True:
+    for symbol in top_20_symbols:
+        df = fetch_ohlcv(symbol, interval='1m', since=since)
+        df = calculate_rsi(df)
+        df = calculate_moving_averages(df)
+        
+        divergences = find_bullish_divergences(df)
+        bear_traps = find_bear_traps(df)
+        crossovers = find_moving_average_crossovers(df)
+        
+        if divergences or bear_traps or crossovers:
+            current_price = df['close'].iloc[-1]
+            message = f"{symbol}에서 다음 신호 발생: 현재가 {current_price} 원\n"
+            if divergences:
+                message += f"{symbol}\n현재가 : {current_price}원\n상승 다이버전스 발생\n매수 추천\n"
+            if bear_traps:
+                message += f"{symbol}\n현재가 : {current_price}원\n베어 트랩 발생\n매수 추천\n"
+            if crossovers:
+                for crossover in crossovers:
+                    if crossover[1] == 'Golden Cross':
+                        message += f"{symbol}\n현재가 : {current_price}원\n1분봉 기준\n50일선 200일선 골든 크로스\n매수 추천\n"
+                    elif crossover[1] == 'Death Cross':
+                        message += f"{symbol}\n현재가 : {current_price}원\n1분봉 기준\n50일선 200일선 데드 크로스\n매도 추천\n"
+            send_line_message(message)
+            plot_chart(df, divergences + bear_traps + crossovers)
+    
+    # 주기적으로 데이터 갱신 (예: 1분)
+    time.sleep(60)
